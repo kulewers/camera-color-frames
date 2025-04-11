@@ -5,6 +5,11 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import React, { useRef, useEffect, useState } from "react";
 
+enum StreamingMode {
+  WebSockets,
+  WebRTC
+}
+
 interface RGB {
   r: number;
   g: number;
@@ -36,8 +41,13 @@ function App() {
   const wsRef = useRef<WebSocket>(null);
   const intervalRef = useRef<number | null>(null);
   const [wsAddr, setWsAddr] = useState("ws://localhost:8000/");
+  const [webRTCAddr, setWebRTCAddr] = useState("http://localhost:8000/offer");
   const [processedFrame, setProcessedFrame] = useState<string | null>(null);
   const processedFrameCanvasRef = useRef<HTMLCanvasElement>(null)
+  const processedFrameVideoRef = useRef<HTMLVideoElement>(null)
+  const streamRef = useRef<MediaStream>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection>(null);
+  const [streamingMode, setStreamingMode] = useState<StreamingMode>(StreamingMode.WebSockets);
 
   const getVideo = async () => {
     try {
@@ -45,6 +55,7 @@ function App() {
         .getUserMedia({
           video: { width: 640, height: 360 }
         });
+      streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.play();
@@ -126,6 +137,82 @@ function App() {
     wsRef.current = ws;
   }
 
+  function createPeerConnection() {
+    var config = {
+      sdpSemantics: 'unified-plan'
+    };
+
+    const pc = new RTCPeerConnection(config);
+
+    // connect audio / video
+    pc.addEventListener('track', (evt) => {
+      if (evt.track.kind == 'video') {
+        if (processedFrameVideoRef.current) {
+          processedFrameVideoRef.current.srcObject = evt.streams[0];
+        }
+      }
+    });
+
+    return pc;
+  }
+
+  const handleConnectWebRTC = () => {
+    const pc = createPeerConnection();
+    peerConnectionRef.current = pc;
+
+    if (streamRef.current) {
+      const stream = streamRef.current;
+      stream.getTracks().forEach((track) => {
+        pc.addTrack(track, stream)
+      });
+      negotiate();
+    }
+
+  }
+
+  const negotiate = () => {
+    const pc = peerConnectionRef.current;
+    if (!pc) return;
+
+    return pc.createOffer().then((offer) => {
+      return pc.setLocalDescription(offer);
+    }).then(() => {
+      return new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') {
+          resolve(0);
+        } else {
+          function checkState() {
+            if (pc && pc.iceGatheringState === 'complete') {
+              pc.removeEventListener('icegatheringstatechange', checkState);
+              resolve(0);
+            }
+          }
+          pc.addEventListener('icegatheringstatechange', checkState);
+        }
+      });
+    }).then(() => {
+      const offer = pc.localDescription;
+
+      return fetch(webRTCAddr, {
+        body: JSON.stringify({
+          sdp: offer?.sdp,
+          type: offer?.type,
+          video_transform: 'none'
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        method: 'POST'
+      });
+    }).then((response) => {
+      return response.json();
+    }).then((answer) => {
+      return pc.setRemoteDescription(answer);
+    }).catch((e) => {
+      console.error(e);
+    })
+  }
+
   return (
     <div className='App'>
       <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -148,15 +235,33 @@ function App() {
 
           <Card>
             <CardContent className="p-6">
-              <div className="video-container">
-                <canvas className="w-full h-auto rounded-md bg-secondary/20 mb-4"
-                  ref={processedFrameCanvasRef}
-                ></canvas>
+              <div>
+                {streamingMode == StreamingMode.WebSockets ? <>
+                  <canvas className={`w-full h-auto rounded-md bg-secondary/20 ${streamingMode == StreamingMode.WebSockets ? "" : "hidden"}`}
+                    ref={processedFrameCanvasRef}
+                  ></canvas>
+
                   <Label htmlFor="wsaddr">WebSockets address:</Label>
-                <div className='flex'>
-                  <Input type="text" id='wsaddr' value={wsAddr} onChange={e => setWsAddr(e.target.value)} placeholder='ws://localhost:8000/' />
-                  <Button onClick={handleConnectWS}>Connect</Button>
-                </div>
+                  <div className='flex mb-4'>
+                    <Input type="text" id='wsaddr' value={wsAddr} onChange={e => setWsAddr(e.target.value)} placeholder='ws://localhost:8000/' />
+                    <Button onClick={handleConnectWS}>Connect</Button>
+                  </div>
+                </> : ''
+                }
+                {streamingMode == StreamingMode.WebRTC ? <>
+                  <video className={`w-full h-auto rounded-md bg-secondary/20 mb-4" ${streamingMode == StreamingMode.WebRTC ? "" : "hidden"}`}
+                    autoPlay={true}
+                    ref={processedFrameVideoRef}
+                  ></video>
+
+                  <Label htmlFor="wsaddr">WebRTC address:</Label>
+                  <div className='flex mb-4'>
+                    <Input type="text" id='webrtcaddr' value={webRTCAddr} onChange={e => setWebRTCAddr(e.target.value)} placeholder='http://localhost:8000/offer' />
+                    <Button onClick={handleConnectWebRTC}>WebRTC</Button>
+                  </div>
+                </> : ''
+                }
+                <Button onClick={() => setStreamingMode(streamingMode == StreamingMode.WebRTC ? StreamingMode.WebSockets : StreamingMode.WebRTC)}>Switch streaming mode</Button>
               </div>
             </CardContent>
           </Card>
