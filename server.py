@@ -1,13 +1,62 @@
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.concurrency import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import base64
 import cv2
 import numpy as np
 import uvicorn
+import asyncio
 
-app = FastAPI()
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay
+from av import VideoFrame
+
+pcs = set()
+relay = MediaRelay()
+
+
+class VideoTransformTrack(MediaStreamTrack):
+    """
+    A video stream track that transforms frames from an another track.
+    """
+
+    kind = "video"
+
+    def __init__(self, track):
+        super().__init__()  # don't forget this!
+        self.track = track
+
+    async def recv(self):
+        frame = await self.track.recv()
+
+        img = frame.to_ndarray(format="bgr24")
+
+        height, width = img.shape[:2]
+
+        rect_width = int(width * 0.3)
+        rect_height = int(height * 0.3)
+
+        x = (width - rect_width) // 2
+        y = (height - rect_height) // 2
+
+        color = (0, 255, 0)
+        cv2.rectangle(img, (x, y), (x + rect_width, y + rect_height), color, -1)
+
+        new_frame = VideoFrame.from_ndarray(img, format="bgr24")
+        new_frame.pts = frame.pts
+        new_frame.time_base = frame.time_base
+        return new_frame
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros)
+    pcs.clear()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +95,36 @@ async def websocket_endpoint(websocket: WebSocket):
             }))
         except:
             pass
+
+@app.post("/offer")
+async def offer(request: Request):
+    params = await request.json()
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+    pc = RTCPeerConnection()
+    pcs.add(pc)
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        if pc.connectionState == "failed":
+            await pc.close()
+            pcs.discard(pc)
+
+    @pc.on("track")
+    def on_track(track):
+        if track.kind == "video":
+            pc.addTrack(
+                VideoTransformTrack(
+                    relay.subscribe(track)
+                )
+            )
+
+    await pc.setRemoteDescription(offer)
+
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
 def process_frame(frame_data):
     try:
