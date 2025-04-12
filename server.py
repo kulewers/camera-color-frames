@@ -28,6 +28,9 @@ class VideoTransformTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.track = track
 
+    def set_color(self, color):
+        self.color = (color['b'], color['g'], color['r'])
+
     async def recv(self):
         frame = await self.track.recv()
 
@@ -41,8 +44,7 @@ class VideoTransformTrack(MediaStreamTrack):
         x = (width - rect_width) // 2
         y = (height - rect_height) // 2
 
-        color = (0, 255, 0)
-        cv2.rectangle(img, (x, y), (x + rect_width, y + rect_height), color, -1)
+        cv2.rectangle(img, (x, y), (x + rect_width, y + rect_height), self.color, -1)
 
         new_frame = VideoFrame.from_ndarray(img, format="bgr24")
         new_frame.pts = frame.pts
@@ -104,6 +106,23 @@ async def offer(request: Request):
     pc = RTCPeerConnection()
     pcs.add(pc)
 
+    video_transform_track = None
+
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        @channel.on("message")
+        def on_message(message):
+            nonlocal video_transform_track
+            if isinstance(message, str):
+                try:
+                    color = json.loads(message)
+                    if video_transform_track:
+                        video_transform_track.set_color(color)
+                except Exception as e:
+                    print(e)
+
+
+
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         if pc.connectionState == "failed":
@@ -112,12 +131,10 @@ async def offer(request: Request):
 
     @pc.on("track")
     def on_track(track):
+        nonlocal video_transform_track
         if track.kind == "video":
-            pc.addTrack(
-                VideoTransformTrack(
-                    relay.subscribe(track)
-                )
-            )
+            video_transform_track = VideoTransformTrack(relay.subscribe(track))
+            pc.addTrack(video_transform_track)
 
     await pc.setRemoteDescription(offer)
 

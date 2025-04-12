@@ -47,6 +47,9 @@ function App() {
   const processedFrameVideoRef = useRef<HTMLVideoElement>(null)
   const peerConnectionRef = useRef<RTCPeerConnection>(null);
   const [streamingMode, setStreamingMode] = useState<StreamingMode>(StreamingMode.WebSockets);
+  const dcRef = useRef<RTCDataChannel>(null);
+  const [avgColor, setAvgColor] = useState<RGB | null>(null);
+  const [dcOpen, setDcOpen] = useState<boolean>(false);
 
   useEffect(() => {
     const getVideo = async () => {
@@ -73,7 +76,7 @@ function App() {
       const video = videoRef.current;
       const ws = wsRef.current;
 
-      if (canvas && video && ws?.readyState === WebSocket.OPEN) {
+      if (canvas && video) {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         canvas.width = 640;
@@ -82,17 +85,19 @@ function App() {
 
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const avgColor = calculateAverageColor(imageData);
+        setAvgColor(avgColor);
 
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-
-        const message = {
-          "type": "frame",
-          "payload": {
-            "data": dataUrl,
-            "avgColor": avgColor,
-          }
-        };
-        ws.send(JSON.stringify(message))
+        if (ws?.readyState === WebSocket.OPEN) {
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+          const message = {
+            "type": "frame",
+            "payload": {
+              "data": dataUrl,
+              "avgColor": avgColor,
+            }
+          };
+          ws.send(JSON.stringify(message))
+        }
       }
     }, 20);
 
@@ -146,21 +151,36 @@ function App() {
 
     const pc = new RTCPeerConnection(config);
 
-    // connect video
-    pc.addEventListener('track', (evt) => {
-      if (evt.track.kind !== 'video') return;
+    pc.addEventListener('track', (e) => {
       if (processedFrameVideoRef.current) {
-        processedFrameVideoRef.current.srcObject = evt.streams[0];
+        processedFrameVideoRef.current.srcObject = e.streams[0];
       }
     });
 
     return pc;
   }
 
+  useEffect(() => {
+    if (dcOpen) {
+      if (dcRef.current) {
+        dcRef.current.send(JSON.stringify(avgColor))
+      }
+    }
+  }, [avgColor])
+
   const handleConnectWebRTC = () => {
     peerConnectionRef.current?.close();
     const pc = createPeerConnection();
     peerConnectionRef.current = pc;
+
+    const dc = pc.createDataChannel('color', { "ordered": true });
+    dc.addEventListener('close', () => {
+      setDcOpen(false);
+    })
+    dc.addEventListener('open', () => {
+      setDcOpen(true);
+    })
+    dcRef.current = dc;
 
     if (videoRef.current) {
       const stream = videoRef.current?.srcObject as MediaStream;
@@ -195,8 +215,7 @@ function App() {
     const response = await fetch(webRTCAddr, {
       body: JSON.stringify({
         sdp: offer?.sdp,
-        type: offer?.type,
-        video_transform: 'none'
+        type: offer?.type
       }),
       headers: {
         'Content-Type': 'application/json'
@@ -205,6 +224,17 @@ function App() {
     });
     const answer = await response.json();
     pc.setRemoteDescription(answer);
+  }
+
+  const switchStreamingMode = () => {
+    if (streamingMode == StreamingMode.WebRTC) {
+      peerConnectionRef.current?.close();
+      dcRef.current?.close();
+      setStreamingMode(StreamingMode.WebSockets);
+    } else {
+      wsRef.current?.close();
+      setStreamingMode(StreamingMode.WebRTC);
+    }
   }
 
   return (
@@ -220,9 +250,12 @@ function App() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
           <Card>
             <CardContent className="p-6">
-              <div className="video-container">
+              <div>
                 <video ref={videoRef} className='w-full h-auto rounded-md bg-secondary/20'></video>
                 <canvas ref={canvasRef} className='hidden'></canvas>
+                {avgColor && (
+                  <p>{`R:${avgColor.r} G:${avgColor.g} B:${avgColor.b}`}</p>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -255,7 +288,7 @@ function App() {
                   </div>
                 </> : ''
                 }
-                <Button onClick={() => setStreamingMode(streamingMode == StreamingMode.WebRTC ? StreamingMode.WebSockets : StreamingMode.WebRTC)}>Switch streaming mode</Button>
+                <Button onClick={switchStreamingMode}>Switch streaming mode</Button>
               </div>
             </CardContent>
           </Card>
