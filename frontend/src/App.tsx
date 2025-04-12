@@ -45,29 +45,27 @@ function App() {
   const [processedFrame, setProcessedFrame] = useState<string | null>(null);
   const processedFrameCanvasRef = useRef<HTMLCanvasElement>(null)
   const processedFrameVideoRef = useRef<HTMLVideoElement>(null)
-  const streamRef = useRef<MediaStream>(null);
   const peerConnectionRef = useRef<RTCPeerConnection>(null);
   const [streamingMode, setStreamingMode] = useState<StreamingMode>(StreamingMode.WebSockets);
 
-  const getVideo = async () => {
-    try {
-      const stream = await navigator.mediaDevices
-        .getUserMedia({
-          video: { width: 640, height: 360 }
-        });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-    } catch (err) {
-      console.error("Error accessing camera:", err)
-    }
-  }
-
   useEffect(() => {
+    const getVideo = async () => {
+      try {
+        const stream = await navigator.mediaDevices
+          .getUserMedia({
+            video: { width: 640, height: 360 }
+          });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+        }
+      } catch (err) {
+        console.error("Error accessing camera:", err)
+      }
+    }
+
     getVideo();
-  }, [videoRef])
+  }, [])
 
   useEffect(() => {
     intervalRef.current = window.setInterval(() => {
@@ -101,7 +99,7 @@ function App() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [wsRef])
+  }, [])
 
   useEffect(() => {
     if (processedFrame && processedFrameCanvasRef.current) {
@@ -129,6 +127,8 @@ function App() {
         if (data.type == 'processed') {
           console.log("Recieved processed frame");
           setProcessedFrame(data.payload.data);
+        } else if (data.type == 'error') {
+          console.error(data.payload);
         }
       } catch (err) {
         console.error(err);
@@ -138,18 +138,19 @@ function App() {
   }
 
   function createPeerConnection() {
-    var config = {
-      sdpSemantics: 'unified-plan'
-    };
+    const config = {
+      // iceServers: [
+      //   { urls: 'stun:stun.l.google.com:19302' },
+      // ],
+    }
 
     const pc = new RTCPeerConnection(config);
 
-    // connect audio / video
+    // connect video
     pc.addEventListener('track', (evt) => {
-      if (evt.track.kind == 'video') {
-        if (processedFrameVideoRef.current) {
-          processedFrameVideoRef.current.srcObject = evt.streams[0];
-        }
+      if (evt.track.kind !== 'video') return;
+      if (processedFrameVideoRef.current) {
+        processedFrameVideoRef.current.srcObject = evt.streams[0];
       }
     });
 
@@ -157,60 +158,53 @@ function App() {
   }
 
   const handleConnectWebRTC = () => {
+    peerConnectionRef.current?.close();
     const pc = createPeerConnection();
     peerConnectionRef.current = pc;
 
-    if (streamRef.current) {
-      const stream = streamRef.current;
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream)
-      });
-      negotiate();
+    if (videoRef.current) {
+      const stream = videoRef.current?.srcObject as MediaStream;
+      if (stream) {
+        const track = stream.getVideoTracks()[0];
+        pc.addTrack(track, stream);
+      }
     }
-
+    negotiate();
   }
 
-  const negotiate = () => {
+  const negotiate = async () => {
     const pc = peerConnectionRef.current;
     if (!pc) return;
 
-    return pc.createOffer().then((offer) => {
-      return pc.setLocalDescription(offer);
-    }).then(() => {
-      return new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') {
-          resolve(0);
-        } else {
-          function checkState() {
-            if (pc && pc.iceGatheringState === 'complete') {
-              pc.removeEventListener('icegatheringstatechange', checkState);
-              resolve(0);
-            }
-          }
-          pc.addEventListener('icegatheringstatechange', checkState);
-        }
-      });
-    }).then(() => {
-      const offer = pc.localDescription;
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-      return fetch(webRTCAddr, {
-        body: JSON.stringify({
-          sdp: offer?.sdp,
-          type: offer?.type,
-          video_transform: 'none'
-        }),
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        method: 'POST'
-      });
-    }).then((response) => {
-      return response.json();
-    }).then((answer) => {
-      return pc.setRemoteDescription(answer);
-    }).catch((e) => {
-      console.error(e);
-    })
+    await new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === 'complete') {
+        resolve();
+      }
+      const checkState = () => {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', checkState);
+          resolve();
+        }
+      };
+      pc.addEventListener('icegatheringstatechange', checkState);
+    });
+
+    const response = await fetch(webRTCAddr, {
+      body: JSON.stringify({
+        sdp: offer?.sdp,
+        type: offer?.type,
+        video_transform: 'none'
+      }),
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      method: 'POST'
+    });
+    const answer = await response.json();
+    pc.setRemoteDescription(answer);
   }
 
   return (
