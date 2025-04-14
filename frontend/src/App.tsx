@@ -284,7 +284,7 @@ function App() {
                   <Label htmlFor="wsaddr">WebRTC address:</Label>
                   <div className='flex mb-4'>
                     <Input type="text" id='webrtcaddr' value={webRTCAddr} onChange={e => setWebRTCAddr(e.target.value)} placeholder='http://localhost:8000/offer' />
-                    <Button onClick={handleConnectWebRTC}>WebRTC</Button>
+                    <Button onClick={handleConnectWebRTC}>Connect</Button>
                   </div>
                 </> : ''
                 }
